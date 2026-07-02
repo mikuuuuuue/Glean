@@ -1,0 +1,137 @@
+storage:
+  base_dir: ./clipped_pages
+  index_file: _index.json
+categories:
+- 科技与AI
+- 财经与商业
+- 游戏与文化
+- 阅读与思考
+- 工具与技巧
+- 视频与影音
+- 其他收藏
+category_keywords:
+  科技与AI:
+  - ai
+  - 人工智能
+  - 大模型
+  - gpt
+  - claude
+  - openai
+  - google
+  - 苹果
+  - 芯片
+  - 半导体
+  - 算法
+  - 模型
+  - 代码
+  - 编程
+  - 开源
+  - 数据
+  - 机器
+  - 软件
+  - 科技
+  财经与商业:
+  - 股价
+  - 股市
+  - 融资
+  - 投资
+  - 财报
+  - 营收
+  - 上市
+  - 市值
+  - 经济
+  - 商业
+  - 市场
+  - 基金
+  - 创业
+  - 公司
+  - 行业
+  - 消费
+  - 电商
+  阅读与思考:
+  - 书
+  - 阅读
+  - 哲学
+  - 历史
+  - 社会
+  - 心理
+  - 教育
+  - 思想
+  - 文学
+  - 深度
+  工具与技巧:
+  - 工具
+  - 教程
+  - 技巧
+  - 指南
+  - 攻略
+  - 配置
+  - 插件
+  - 软件推荐
+  - 效率
+  - 自动化
+  - workflow
+  视频与影音:
+  - 视频
+  - b站
+  - bilibili
+  - youtube
+  - 抖音
+  - 快手
+  - 播客
+  - podcast
+  - vlog
+  - 影视
+  - 电影
+  - 纪录片
+  游戏与文化:
+  - 游戏与文化
+features:
+  download_images: true
+  video_subtitle: true
+  ai_summary: false
+scraping:
+  backend: auto
+  firecrawl:
+    api_key: "fc-YOUR_API_KEY_HERE"   # 替换为你的 Firecrawl API Key
+    only_main_content: true
+    wait_for: 1000
+video:
+  bilibili: pass
+  platforms:
+  - bilibili
+ai_summary:
+  provider: ''
+  api_key: ''
+  base_url: ''
+  model: ''
+  prompt_template: '请总结以下视频内容，包括：
+
+    1. 视频核心主题
+
+    2. 关键观点和论据
+
+    3. 值得记住的要点
+
+    4. 一句话总结
+
+    '
+limits:
+  max_images: 20
+  max_content_chars: 50000
+  image_timeout: 10
+  page_fetch_timeout: 20
+screenshot:
+  enabled: true
+  engine: auto            # auto=playwright优先firecrawl回退; playwright; firecrawl; off
+  timeout: 30
+  user_agent: ""          # 留空用 playwright 默认
+unsupported_image_domains:
+- zhstatic
+- zhihu.com
+- weixin
+- mmbiz
+- qpic.cn
+- bing.com
+- googleusercontent.com
+- fbcdn.net
