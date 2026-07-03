@@ -45,7 +45,7 @@ async def resolve_b23(url: str) -> Optional[str]:
         return url
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             location = resp.headers.get("Location", "")
             if location:
@@ -53,6 +53,29 @@ async def resolve_b23(url: str) -> Optional[str]:
     except Exception:
         pass
     return url
+
+
+async def resolve_av_to_bv(bvid: str) -> str:
+    """将 av 号转为 BV 号（bili-cli 不支持 av 格式）。
+
+    通过 B站 API: https://api.bilibili.com/x/web-interface/view?aid=XXX
+    """
+    if not bvid or not bvid.lower().startswith("av"):
+        return bvid
+    aid = bvid[2:]  # 去掉 "av" 前缀
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+            resp = await client.get(
+                f"https://api.bilibili.com/x/web-interface/view?aid={aid}",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                return data["data"]["bvid"]
+    except Exception:
+        pass
+    return bvid  # 转换失败返回原值
 
 
 # ═══════════════════════════════════════════════════════════
@@ -77,6 +100,8 @@ async def clip_bilibili(url: str, output_dir: Path,
         "title": "未知视频",
         "md_file": None,
         "has_subtitle": False,
+        "subtitle_source": None,
+        "transcript_file": None,
         "description": "",
         "cover_file": None,
         "warnings": [],
@@ -110,6 +135,12 @@ async def clip_bilibili(url: str, output_dir: Path,
             bvid = extract_bvid(resolved)
             if bvid:
                 url = resolved
+
+    # av 号转为 BV 号（bili-cli 不支持 av 格式）
+    if bvid and bvid.lower().startswith("av"):
+        bv = await resolve_av_to_bv(bvid)
+        if bv != bvid:
+            bvid = bv
 
     if not bvid:
         # 失败占位 md（需求 6.4）
@@ -162,17 +193,22 @@ async def clip_bilibili(url: str, output_dir: Path,
 
         data = raw.get("data", {})
 
-        # ── 提取字段 ──
-        title = data.get("title", "未知视频")
-        desc = data.get("desc", "")
-        pic = data.get("pic", "")
-        owner = data.get("owner", {})
+        # ── 提取字段（兼容 bili-cli 新旧 schema） ──
+        # v0.6.2: data.video.{title,description,owner,stats,duration_seconds}
+        # 旧版:   data.{title,desc,owner,stat,duration}
+        video_data = data.get("video", data) if isinstance(data.get("video"), dict) else data
+        title = video_data.get("title", "未知视频")
+        desc = video_data.get("description", "") or video_data.get("desc", "")
+        pic = video_data.get("pic", "")
+        owner = video_data.get("owner", {})
         uploader = owner.get("name", "未知UP主") if isinstance(owner, dict) else str(owner)
-        stat = data.get("stat", {})
-        duration = data.get("duration", 0)
+        stat = video_data.get("stats", video_data.get("stat", {}))
+        duration = video_data.get("duration_seconds", video_data.get("duration", 0))
+        if not isinstance(duration, int):
+            duration = 0
         view_count = stat.get("view", 0) if isinstance(stat, dict) else 0
         like_count = stat.get("like", 0) if isinstance(stat, dict) else 0
-        pubdate = data.get("pubdate", 0)
+        pubdate = video_data.get("pubdate", 0)
 
         result["title"] = title
         result["description"] = desc[:500] if desc else ""
@@ -190,11 +226,41 @@ async def clip_bilibili(url: str, output_dir: Path,
         subtitle_text = None
         subtitle_data = data.get("subtitle")
         if subtitle_data:
-            # bili-cli 把字幕以纯文本或结构化形式返回
-            if isinstance(subtitle_data, str):
+            # bili-cli v0.6.2: {"available": bool, "format": "plain", "text": "...", "items": [...]}
+            if isinstance(subtitle_data, dict):
+                if subtitle_data.get("available", False) is False:
+                    # v0.6.2 明确标记无字幕
+                    subtitle_text = None
+                else:
+                    # 优先用 text 字段（纯文本）
+                    text = subtitle_data.get("text", "").strip()
+                    if text:
+                        subtitle_text = text
+                    else:
+                        # 回退到 items 结构化数据
+                        items = subtitle_data.get("items", [])
+                        if items:
+                            lines = []
+                            for item in items:
+                                if isinstance(item, dict):
+                                    content = item.get("content", "").strip()
+                                    if content and (not lines or lines[-1] != content):
+                                        lines.append(content)
+                            subtitle_text = "\n".join(lines) if lines else None
+                        # 旧版可能嵌套在 body 里
+                        if not subtitle_text:
+                            body = subtitle_data.get("body", [])
+                            if body:
+                                lines = []
+                                for item in body:
+                                    content = item.get("content", "").strip()
+                                    if content and (not lines or lines[-1] != content):
+                                        lines.append(content)
+                                subtitle_text = "\n".join(lines) if lines else None
+            elif isinstance(subtitle_data, str):
                 subtitle_text = subtitle_data.strip()
             elif isinstance(subtitle_data, list):
-                # 结构化: [{"from": 0.0, "to": 1.5, "content": "文字"}, ...]
+                # 旧版结构化: [{"from": 0.0, "to": 1.5, "content": "文字"}, ...]
                 lines = []
                 for item in subtitle_data:
                     if isinstance(item, dict):
@@ -202,21 +268,49 @@ async def clip_bilibili(url: str, output_dir: Path,
                         if content and (not lines or lines[-1] != content):
                             lines.append(content)
                 subtitle_text = "\n".join(lines) if lines else None
-            elif isinstance(subtitle_data, dict):
-                # 可能嵌套在 dict 里
-                body = subtitle_data.get("body", [])
-                if body:
-                    lines = []
-                    for item in body:
-                        content = item.get("content", "").strip()
-                        if content and (not lines or lines[-1] != content):
-                            lines.append(content)
-                    subtitle_text = "\n".join(lines) if lines else None
+
+        subtitle_source = "official" if subtitle_text else None
 
         if subtitle_text:
             result["has_subtitle"] = True
         else:
-            result["warnings"].append("该视频无字幕或字幕为空（可能需要登录 bili login）")
+            # ── 无官方字幕 → 分级 ASR 回退 ──
+            asr_cfg = _CONFIG.get("asr", {}) or {}
+            if asr_cfg.get("enabled", False):
+                from clipper.asr import transcribe_with_fallback
+                audio_dir = Path(asr_cfg.get("audio_dir") or "") or output_dir
+                audio_path = await download_bilibili_audio(bvid, audio_dir)
+                if audio_path:
+                    asr_res = await transcribe_with_fallback(
+                        audio_path, output_dir,
+                        language=asr_cfg.get("videocaptioner", {}).get("language", "auto"),
+                    )
+                    result["warnings"] += asr_res.get("warnings", [])
+                    if asr_res.get("success"):
+                        subtitle_text = asr_res["text"]
+                        subtitle_source = f"asr:{asr_res['engine']}"
+                        result["has_subtitle"] = True
+                        result["warnings"].append(
+                            f"无官方字幕，已用 {asr_res['engine']} ASR 转写（结果可能存在误差）")
+                        if asr_res.get("transcript_file"):
+                            result["transcript_file"] = asr_res["transcript_file"]
+                    else:
+                        result["warnings"].append(
+                            f"ASR 回退失败: {asr_res.get('error', '')}")
+                    # 音频清理
+                    if not asr_cfg.get("keep_audio", False) and audio_path:
+                        try:
+                            audio_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                else:
+                    result["warnings"].append(
+                        "音频下载失败(bili audio)，跳过 ASR；"
+                        "确认已装 audio 扩展: pipx install 'bilibili-cli[audio]'")
+            else:
+                result["warnings"].append("该视频无字幕或字幕为空（可能需要登录 bili login）")
+
+        result["subtitle_source"] = subtitle_source
 
         # ── 格式化 ──
         mins, secs = divmod(duration or 0, 60)
@@ -280,9 +374,15 @@ async def clip_bilibili(url: str, output_dir: Path,
             sub_text = subtitle_text[:10000] if len(subtitle_text) > 10000 else subtitle_text
             if len(subtitle_text) > 10000:
                 sub_text += "\n\n> ⚠️ 字幕内容过长，已截断前10000字"
-            md_lines.extend(["", "## 🎤 字幕内容", "", sub_text])
+            md_lines.extend(["", "## 🎤 字幕内容", ""])
+            if subtitle_source and subtitle_source.startswith("asr:"):
+                md_lines.append(
+                    f"> ℹ️ 本字幕由 ASR 自动转写（{subtitle_source.split(':', 1)[1]}），"
+                    "未经人工校对，可能存在识别误差。\n")
+            md_lines.append(sub_text)
         else:
-            md_lines.extend(["", "## 🎤 字幕内容", "", "> 字幕不可用，未生成总结"])
+            md_lines.extend(["", "## 🎤 字幕内容", "",
+                             "> 字幕不可用（官方无字幕且 ASR 回退失败），未生成总结"])
 
         md_lines.extend([
             "", "---", "",
@@ -332,7 +432,7 @@ async def _download_cover(pic_url: str, output_dir: Path) -> Optional[Path]:
     """下载B站封面图到输出目录，返回本地路径"""
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True, trust_env=False) as client:
             resp = await client.get(pic_url, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
             content_type = resp.headers.get("Content-Type", "").lower()
@@ -402,8 +502,58 @@ def _bili_cli_available() -> bool:
         return False
 
 
+def _bili_audio_available() -> bool:
+    """检查 bili-cli 是否已安装 audio 扩展（bili audio 子命令）"""
+    try:
+        result = subprocess.run(
+            ["bili", "audio", "--help"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+async def download_bilibili_audio(bvid: str, out_dir: Path) -> Optional[Path]:
+    """用 bili-cli 下载完整音频(--no-split，m4a)。失败返回 None。
+
+    需 audio 扩展: pipx install 'bilibili-cli[audio]'
+    """
+    if not _bili_audio_available():
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        try:
+            proc = subprocess.run(
+                ["bili", "audio", bvid, "--no-split", "-o", str(out_dir)],
+                capture_output=True, text=True, timeout=900,
+            )
+            return proc
+        except subprocess.TimeoutExpired:
+            return None
+        except Exception:
+            return None
+
+    proc = await loop.run_in_executor(None, _run)
+    if not proc or proc.returncode != 0:
+        return None
+    # bili-cli 输出文件名不确定，glob 兜底（优先 m4a，其次 mp3/wav）
+    for ext in ("*.m4a", "*.mp3", "*.wav", "*.mp4"):
+        files = sorted(out_dir.glob(ext))
+        if files:
+            return files[-1]
+    return None
+
+
 async def _run_bili_cli(bvid: str) -> Optional[dict]:
-    """执行 bili-cli 并返回 JSON 结果"""
+    """执行 bili-cli 并返回 JSON 结果
+
+    注意: bili-cli 在字幕获取失败(如未登录)时会返回 exit code 1，
+    但 stdout 中的 JSON 仍可能 ok:true 且包含视频信息。
+    因此优先解析 JSON，仅当 JSON 解析失败时才看 exit code。
+    """
     loop = asyncio.get_event_loop()
 
     def _run():
@@ -412,18 +562,21 @@ async def _run_bili_cli(bvid: str) -> Optional[dict]:
                 ["bili", "video", bvid, "--subtitle", "--json"],
                 capture_output=True, text=True, timeout=30,
             )
-            if proc.returncode != 0:
-                stderr = proc.stderr.strip()
-                # 常见错误提示
-                if "not logged in" in stderr.lower() or "login" in stderr.lower():
-                    return {"ok": False, "error": "未登录，请执行 bili login 扫码登录"}
-                return {"ok": False, "error": stderr or f"退出码 {proc.returncode}"}
+            # 优先解析 JSON（bili-cli 字幕失败时 exit code=1 但 JSON 仍有效）
+            if proc.stdout and proc.stdout.strip():
+                try:
+                    data = json_mod.loads(proc.stdout)
+                    if data.get("ok"):
+                        return data
+                except json_mod.JSONDecodeError:
+                    pass  # JSON 解析失败，继续走 exit code 逻辑
 
-            # 解析 JSON
-            return json_mod.loads(proc.stdout)
+            # JSON 无效或 ok:false，按 exit code 处理
+            stderr = (proc.stderr or "").strip()
+            if "not logged in" in stderr.lower() or "login" in stderr.lower():
+                return {"ok": False, "error": "未登录，请执行 bili login 扫码登录"}
+            return {"ok": False, "error": stderr or f"退出码 {proc.returncode}"}
 
-        except json_mod.JSONDecodeError as e:
-            return {"ok": False, "error": f"JSON 解析失败: {e}"}
         except FileNotFoundError:
             return {"ok": False, "error": "bili-cli 未安装"}
         except subprocess.TimeoutExpired:

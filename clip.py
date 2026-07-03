@@ -257,6 +257,7 @@ async def clip_url(
                     "path": video_result.get("md_file"),
                     "title": real_title,
                     "has_subtitle": video_result.get("has_subtitle", False),
+                    "subtitle_source": video_result.get("subtitle_source"),
                 })
             else:
                 all_errors.append({
@@ -270,6 +271,7 @@ async def clip_url(
                 "path": video_result.get("md_file"),
                 "title": real_title,
                 "has_subtitle": video_result.get("has_subtitle", False),
+                "subtitle_source": video_result.get("subtitle_source"),
             })
         else:
             # 失败占位 md 仍可能已落在 temp_folder
@@ -285,6 +287,7 @@ async def clip_url(
                         "path": video_result.get("md_file"),
                         "title": real_title,
                         "has_subtitle": False,
+                        "subtitle_source": None,
                     })
             all_errors.append({
                 "type": "video",
@@ -789,7 +792,16 @@ def format_result(result: dict) -> str:
             elif t == "screenshot":
                 lines.append(f"- 🖼️ 长截图已保存")
             elif t == "video_md":
-                lines.append(f"- 📺 视频信息已保存{' (含字幕)' if item.get('has_subtitle') else ''}")
+                src = item.get("subtitle_source")
+                if src == "official":
+                    tag = " (官方字幕)"
+                elif src and src.startswith("asr:"):
+                    tag = f" ({src.split(':', 1)[1]}转写)"
+                elif item.get("has_subtitle"):
+                    tag = " (含字幕)"
+                else:
+                    tag = ""
+                lines.append(f"- 📺 视频信息已保存{tag}")
             elif t == "image_md":
                 lines.append(f"- 🖼️ 图片已保存 ({item.get('images', 0)} 张原图)")
             elif t == "doc_md":

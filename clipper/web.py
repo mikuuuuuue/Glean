@@ -139,7 +139,7 @@ async def clip_webpage_firecrawl(url: str, output_dir: Path, category: str = "å…
         if screenshot_url:
             ss_path_obj = output_dir / "screenshot.png"
             try:
-                async with httpx.AsyncClient(timeout=30) as client:
+                async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
                     resp = await client.get(screenshot_url)
                     resp.raise_for_status()
                     output_dir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +272,7 @@ async def clip_webpage(
     html = None
     page_cookies = {}
     try:
-        async with httpx.AsyncClient(timeout=fetch_timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=fetch_timeout, follow_redirects=True, trust_env=False) as client:
             resp = await client.get(url, headers=_DEFAULT_HEADERS)
             resp.raise_for_status()
             html = resp.text
@@ -557,7 +557,7 @@ async def _download_images(
                     cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
                     headers["Cookie"] = cookie_str
 
-                async with httpx.AsyncClient(timeout=img_timeout, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=img_timeout, follow_redirects=True, trust_env=False) as client:
                     resp = await client.get(img_url, headers=headers)
                     resp.raise_for_status()
 

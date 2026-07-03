@@ -100,6 +100,41 @@ video:
   bilibili: pass
   platforms:
   - bilibili
+asr:
+  enabled: false                      # 总开关；false=无字幕直接标部分失败(保持旧行为)
+  keep_audio: false                   # 是否保留下载的音频(m4a)；默认转写后删除省空间
+  keep_transcript: true               # 是否单独存 transcript.txt(照存ASR文本)
+  audio_dir: ''                       # 音频临时目录；空=用条目目录
+  fallback_chain:                     # 回退顺序，可删减
+  - videocaptioner:bijian
+  - videocaptioner:jianying
+  - volcengine
+  videocaptioner:
+    binary: videocaptioner            # CLI 路径(pipx 装的可填全路径)
+    language: auto                    # auto/zh/en/ja...；bijian/jianying 仅中英文
+    timeout: 600                      # 单次转写超时(秒)
+  volcengine:
+    appid: ''                         # 火山控制台获取
+    token: ''                         # 同上(填到鉴权头 Bearer; {token})
+    cluster: ''                       # 豆包2.0对应 Cluster ID
+    language: zh-CN
+    poll_interval: 5
+    poll_timeout: 600
+    audio_url:
+      method: ''                      # local_http | tos | tunnel；空=火山禁用
+      local_http:
+        public_base: ''               # 公网可达基址,如 http://1.2.3.4:8765
+        port: 8765
+      tos:
+        access_key: ''
+        secret_key: ''
+        endpoint: tos-cn-beijing.volces.com
+        region: cn-beijing
+        bucket: ''
+        prefix: glean-asr/
+        expire_seconds: 3600
+      tunnel:
+        binary: cloudflared            # cloudflared 路径
 ai_summary:
   provider: ''
   api_key: ''

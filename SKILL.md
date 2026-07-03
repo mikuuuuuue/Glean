@@ -112,6 +112,7 @@ clipped_pages/
         ├── screenshot.png   # 网页长截图（Firecrawl 生效时）
         ├── image.md         # 图片剪藏
         ├── video.md         # B站视频（标题/简介/字幕/封面 cover.*）
+        ├── transcript.txt   # ASR 转写文本（无官方字幕时，照存）
         └── doc.md           # PDF/Word 抽取正文（原文件存档同目录）
 clippings 索引：_index.json（条目：url/type/title/category/folder/source/status/...）
 ```
@@ -144,6 +145,71 @@ clippings 索引：_index.json（条目：url/type/title/category/folder/source/
 - 截图失败一律降级为 warning（回执里提示"长截图失败，已跳过"），**绝不阻断正文剪藏**。
 - 超长页面整页截图偶发被浏览器分块/超时，可调 `screenshot.timeout`。
 
+## 视频 ASR 分级回退
+
+当 B站视频**无官方字幕**时，自动启动分级 ASR 回退，将音频转写为文本照存（不做 LLM 总结，交 clawbot agent 自身能力）。
+
+### 回退链
+
+```
+① 官方字幕（bili-cli）                    ← 最准，零成本
+② bili-cli 下载音频（bili audio --no-split） ← 复用登录态
+③ VideoCaptioner bijian 转写（免费）        ← 必剪引擎，仅中英文
+④ VideoCaptioner jianying 转写（免费）      ← 剪映引擎，仅中英文
+⑤ 火山引擎豆包 2.0（付费兜底）              ← 0.80元/h，支持10+语种
+```
+
+各级失败仅记 warning 不阻断下一级；全部失败标"部分失败"并写占位 md。非中英视频自动跳过 bijian/jianying，直奔火山引擎。
+
+### 设计原则
+
+- ASR 转写文本照存进 `video.md` 字幕区 + 单独 `transcript.txt`
+- **不做 LLM 总结**（`ai_summary` 保持 false，总结交 clawbot agent）
+- `asr.enabled` 默认 false，零行为变更（不启用时无字幕视频仍走旧"部分失败"逻辑）
+
+### 配置
+
+```yaml
+asr:
+  enabled: false                # 总开关
+  keep_audio: false             # 转写后删除音频（省空间）
+  keep_transcript: true         # 单独存 transcript.txt
+  fallback_chain:               # 回退顺序，可删减
+    - videocaptioner:bijian
+    - videocaptioner:jianying
+    - volcengine
+  videocaptioner:
+    binary: videocaptioner
+    language: auto              # bijian/jianying 仅中英文
+    timeout: 600
+  volcengine:
+    appid: ""                   # 火山控制台获取
+    token: ""
+    cluster: ""                 # 豆包2.0 Cluster ID
+    audio_url:
+      method: ""                # local_http | tos | tunnel；空=火山禁用
+```
+
+### 火山引擎音频 URL
+
+火山引擎录音文件识别 API 只接受**可下载的音频 URL**，不接受本地文件直传。三种供给方案：
+
+| 方案 | 适用 | 依赖 |
+|------|------|------|
+| `local_http` | 有公网 IP | 无（stdlib） |
+| `tunnel` | NAT 后 NAS | cloudflared |
+| `tos` | 任意 | `tos` SDK（火山对象存储） |
+
+默认 `method` 留空 = 火山禁用，强制显式选择避免静默失败。
+
+### 安装
+
+```bash
+pipx install "bilibili-cli[audio]"   # 音频下载（复用已有 bili login）
+pip install videocaptioner           # 免费 ASR（bijian/jianying）
+# 火山引擎：控制台获取 appid/token/cluster 填入 config.yaml
+```
+
 ## 配置
 
 编辑 `config.yaml`：
@@ -170,9 +236,12 @@ pip install httpx html2text pyyaml firecrawl-py
 pip install python-docx pypdf               # 文档剪藏
 pip install playwright && playwright install --with-deps chromium   # 整页长截图（NAS/Linux 容器）；不装则回退 Firecrawl
 pipx install bilibili-cli && bili login    # B站视频（扫码登录）
+pipx install "bilibili-cli[audio]"         # B站音频下载（ASR 回退前置；复用已有登录态）
+pip install videocaptioner                 # 免费 ASR 转写（bijian/jianying 引擎）
 ```
 
 ## 本地性与隐私
 
 - 原文不主动上传第三方服务；Firecrawl 仅用于公开网页抓取，AI 总结/OCR 由 clawbot agent 自身能力完成。
 - 每条剪藏必有原始来源与日期，确保可追溯。
+- ASR 回退为可选功能（`asr.enabled` 默认 false）。启用后：VideoCaptioner 本地转写不上传音频；火山引擎为云端 ASR，仅上传音频 URL（官方字幕存在时不触发 ASR，零上传）。如不希望任何音频上云，只启用 VideoCaptioner、不配火山引擎即可。

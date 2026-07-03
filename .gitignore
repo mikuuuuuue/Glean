@@ -39,3 +39,13 @@ desktop.ini
 # Environment
 .env
 .env.local
+
+# Trae working directory (internal, not for GitHub)
+.trae/
+
+# Research/notes (internal reference)
+新建文件夹/
+
+# ASR temporary audio files (extra safety; normally inside clipped_pages/)
+*.m4a
+*.m4r
