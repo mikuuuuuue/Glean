@@ -136,6 +136,83 @@ clipped_pages/
 - [python-docx](https://github.com/python-openxml/python-docx) — Word 文档解析库
 - [pypdf](https://github.com/py-pdf/pypdf) — PDF 文档解析库
 
+## 测试与质量门禁
+
+### 运行测试
+
+```bash
+# 安装测试依赖
+pip install -r requirements-tests.txt
+
+# 运行全部测试
+python -m pytest tests/ -v
+
+# 运行测试并生成覆盖率报告(阈值 ≥80%)
+python -m pytest tests/ --cov=clipper --cov-report=term-missing --cov-fail-under=80
+
+# 仅运行单元测试
+python -m pytest tests/unit/ -v
+
+# 仅运行集成测试
+python -m pytest tests/integration/ -v
+
+# 仅运行契约测试
+python -m pytest tests/contract/ -v
+```
+
+### 代码质量门禁
+
+```bash
+# Lint 检查(必须零错误)
+python -m ruff check clip.py clipper/
+
+# 代码格式化检查
+python -m ruff format --check clip.py clipper/
+
+# 类型检查(严格模式)
+python -m mypy --strict clipper/ --ignore-missing-imports
+```
+
+### 测试结构
+
+```
+tests/
+├── conftest.py              # pytest 公共 fixtures
+├── unit/                     # 单元测试
+│   ├── test_config.py
+│   ├── test_indexer.py
+│   ├── test_folder.py
+│   ├── test_validators.py
+│   ├── test_categorizer.py
+│   ├── test_categorizer_extended.py
+│   ├── test_search_stats.py
+│   ├── test_web_dedup.py
+│   ├── test_video_dedup.py
+│   ├── test_image_dedup.py
+│   ├── test_doc_dedup.py
+│   ├── test_url_detector.py
+│   ├── test_platform.py
+│   ├── test_screenshot.py
+│   ├── test_doc_extended.py
+│   ├── test_video_extended.py
+│   └── test_asr.py
+├── integration/              # 集成测试
+│   ├── test_web_pipeline.py
+│   ├── test_asr_fallback.py
+│   ├── test_video_asr_all_fail.py
+│   ├── test_image_clip.py
+│   ├── test_doc_clip.py
+│   ├── test_doc_protected.py
+│   ├── test_batch_clip.py
+│   ├── test_batch_mixed.py
+│   └── test_clip_workflow.py
+└── contract/                 # 契约测试
+    ├── test_firecrawl_api.py
+    ├── test_volcengine_api.py
+    ├── test_videocaptioner_api.py
+    └── test_bilibili_cli.py
+```
+
 ## 许可证
 
 MIT

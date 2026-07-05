@@ -1,19 +1,24 @@
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
+*.pyo
+*.pyd
+.Python
 *.egg-info/
 *.egg
 dist/
 build/
-.eggs/
 
 # Virtual environments
 .venv/
 venv/
 env/
-ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
 
 # IDE
 .vscode/
@@ -22,30 +27,19 @@ ENV/
 *.swo
 *~
 
-# Config with secrets (use config.example.yaml as template)
-config.yaml
-
-# User data (clipped content)
-clipped_pages/
-
 # OS
 .DS_Store
 Thumbs.db
-desktop.ini
+*.tmp
 
-# Logs
-*.log
+# Project specific
+config.yaml
+clipped_pages/
+*.corrupted.*
+transcript.txt
 
-# Environment
-.env
-.env.local
-
-# Trae working directory (internal, not for GitHub)
+# IDE / Tool directories
 .trae/
-
-# Research/notes (internal reference)
+.reasonix/
 新建文件夹/
-
-# ASR temporary audio files (extra safety; normally inside clipped_pages/)
-*.m4a
-*.m4r
+reasonix.toml

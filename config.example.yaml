@@ -156,11 +156,15 @@ limits:
   max_content_chars: 50000
   image_timeout: 10
   page_fetch_timeout: 20
+  max_file_size_mb: 20          # FR-013b: 单文件大小上限(MB)
+  max_video_duration_min: 15    # FR-013b: 视频时长上限(分钟)
 screenshot:
   enabled: true
   engine: auto            # auto=playwright优先firecrawl回退; playwright; firecrawl; off
   timeout: 30
   user_agent: ""          # 留空用 playwright 默认
+  full_page: true         # T023: 整页长截图(全页 vs 首屏)
+  store_screenshot: true  # T024: 是否保存截图文件到磁盘
 unsupported_image_domains:
 - zhstatic
 - zhihu.com

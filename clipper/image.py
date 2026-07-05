@@ -6,12 +6,17 @@
   3. 写元信息头。
 """
 
+import contextlib
 import hashlib
-import os
 import shutil
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any
+
+from clipper.logging import get_logger
+
+_log = get_logger("clipper.image")
 
 
 def file_content_hash(file_path: Path) -> str:
@@ -27,12 +32,12 @@ def file_content_hash(file_path: Path) -> str:
 
 
 def clip_image(
-    image_paths: list,
+    image_paths: list[Any],
     output_dir: Path,
     category: str = "其他收藏",
-    source_url: Optional[str] = None,
-    category_fn=None,
-) -> dict:
+    source_url: str | None = None,
+    category_fn: Callable[[str, str], str] | None = None,
+) -> dict[str, Any]:
     """
     把一组图片剪藏。
 
@@ -42,7 +47,7 @@ def clip_image(
     Returns:
         dict: {success, title, md_file, content_hash, files, warnings, error}
     """
-    result = {
+    result: dict[str, Any] = {
         "success": False,
         "title": "图片剪藏",
         "md_file": None,
@@ -50,6 +55,7 @@ def clip_image(
         "files": [],
         "warnings": [],
         "error": None,
+        "fetch_backend": "local",  # FR-012
     }
 
     # 校验图片
@@ -57,6 +63,15 @@ def clip_image(
     if not valid:
         result["error"] = "没有有效的图片文件"
         return result
+
+    # FR-013b: 文件大小前置校验
+    from clipper.validators import validate_file_size
+
+    for img in valid:
+        size_ok, size_err = validate_file_size(img)
+        if not size_ok:
+            result["warnings"].append(size_err)
+            _log.warning("image_size_exceeded", src=str(img))
 
     # 以第一张图的内容哈希作为整组查重标识
     content_hash = file_content_hash(valid[0])
@@ -75,6 +90,7 @@ def clip_image(
             saved_files.append(dest_name)
         except Exception as e:
             result["warnings"].append(f"保存图片 {src.name} 失败: {e}")
+            _log.warning("image_save_failed", src=str(src), error=str(e))
 
     # 标题：用第一张图名（去扩展名）
     title = valid[0].stem or "图片剪藏"
@@ -82,10 +98,8 @@ def clip_image(
 
     # 回算领域（可选；图片无文本描述）
     if category_fn is not None:
-        try:
+        with contextlib.suppress(Exception):
             category = category_fn(title, "") or category
-        except Exception:
-            pass
     result["category"] = category
 
     # 构建 md
@@ -94,9 +108,9 @@ def clip_image(
         f"# {title}",
         "",
         f"> 📅 剪藏时间：{now}",
-        f"> 🏷️ 来源类型：image",
+        "> 🏷️ 来源类型：image",
         f"> 📁 领域：{category}",
-        f"> ✅ 抓取状态：成功",
+        "> ✅ 抓取状态：成功",
         (f"> 🔗 来源：[{source_url}]({source_url})" if source_url else ""),
         "",
         "---",
@@ -104,7 +118,7 @@ def clip_image(
         f"## 🖼️ 图片（共 {len(saved_files)} 张）",
         "",
     ]
-    for idx, (name, orig) in enumerate(zip(saved_files, valid), 1):
+    for idx, (name, orig) in enumerate(zip(saved_files, valid, strict=False), 1):
         md_lines += [
             f"### 图 {idx}：{orig.name}",
             "",
@@ -121,9 +135,9 @@ def clip_image(
         "",
         "## 📋 元数据",
         "",
-        f"- **来源类型**：image",
+        "- **来源类型**：image",
         f"- **领域**：{category}",
-        f"- **抓取状态**：成功",
+        "- **抓取状态**：成功",
         f"- **图片数量**：{len(saved_files)}",
         f"- **内容哈希**：{content_hash}",
         f"- **剪藏时间**：{now}",

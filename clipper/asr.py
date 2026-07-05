@@ -11,20 +11,28 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import httpx
-import yaml
+
+from clipper.config import ConfigProxy, get_config
+from clipper.logging import get_logger
+
+_CONFIG = ConfigProxy()
+_log = get_logger("clipper.asr")
 
 
-def _load_config():
-    config_path = Path(__file__).parent.parent / "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+class _ASRProxy:
+    """ASR 配置代理:每次 .get() 从 asr 子节获取,支持测试时重置缓存。"""
+
+    __slots__ = ()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        val = get_config().get("asr", {}).get(key, default)
+        return val if val is not None else default
 
 
-_CONFIG = _load_config()
-_ASR_CONFIG = _CONFIG.get("asr", {}) or {}
+_ASR_CONFIG = _ASRProxy()
 
 # bijian/jianying 仅支持中英文
 _ZH_EN_LANGS = {"auto", "zh", "en", "zh-CN", "en-US", "zh-Hans", "zh-TW"}
@@ -36,101 +44,48 @@ _VOLC_BASE = "https://openspeech.bytedance.com/api/v1/auc"
 # 公开 API
 # ═══════════════════════════════════════════════════════════
 
+
 async def transcribe_with_fallback(
     audio_path: Path,
     out_dir: Path,
     language: str = "auto",
-) -> dict:
-    """分级回退转写。
+) -> dict[str, Any]:
+    """分级回退转写(T037: 委托给 FallbackChain,保持公共接口不变)。
 
     Returns:
         dict: {success, text, engine, transcript_file, warnings, error}
         engine 取值: "bijian" | "jianying" | "volcengine" | None
     """
-    result = {
-        "success": False,
-        "text": "",
-        "engine": None,
-        "transcript_file": None,
-        "warnings": [],
-        "error": None,
-    }
+    from clipper.asr_fallback import build_default_chain
 
-    if not audio_path or not audio_path.exists():
-        result["error"] = "音频文件不存在，无法 ASR"
-        return result
-
-    chain = _ASR_CONFIG.get("fallback_chain", [
-        "videocaptioner:bijian",
-        "videocaptioner:jianying",
-        "volcengine",
-    ])
-
-    # 非中英语言跳过 bijian/jianying（两者仅支持中英文）
-    if language not in _ZH_EN_LANGS:
-        chain = [c for c in chain if not c.startswith("videocaptioner:")]
-        if not chain:
-            result["warnings"].append(
-                f"语言 '{language}' 非中英文，bijian/jianying 不可用，且未配置其他引擎")
-            result["error"] = "ASR 全部回退失败"
-            return result
-
-    for step in chain:
-        engine = None
-        ok, text, warns = False, "", []
-
-        if step.startswith("videocaptioner:"):
-            engine = step.split(":", 1)[1]
-            vc_cfg = _ASR_CONFIG.get("videocaptioner", {}) or {}
-            ok, text, warns = await transcribe_with_videocaptioner(
-                audio_path, engine,
-                vc_cfg.get("timeout", 600),
-            )
-        elif step == "volcengine":
-            engine = "volcengine"
-            ok, text, warns = await transcribe_with_volcengine(
-                audio_path, _ASR_CONFIG.get("volcengine", {}) or {},
-            )
-
-        result["warnings"] += warns
-        if ok and text.strip():
-            result.update(success=True, text=text, engine=engine)
-            # 照存 transcript.txt
-            if _ASR_CONFIG.get("keep_transcript", True):
-                tf = out_dir / "transcript.txt"
-                tf.parent.mkdir(parents=True, exist_ok=True)
-                tf.write_text(text, encoding="utf-8")
-                result["transcript_file"] = str(tf)
-            break
-
-    if not result["success"]:
-        result["error"] = "ASR 全部回退失败"
-    return result
+    chain = build_default_chain()
+    return await chain.transcribe(audio_path, language)
 
 
 # ═══════════════════════════════════════════════════════════
 # VideoCaptioner 转写（Python API，绕过 FFmpeg）
 # ═══════════════════════════════════════════════════════════
 
+
 def videocaptioner_available() -> bool:
     """检测 VideoCaptioner Python 包是否可用"""
     try:
         import videocaptioner  # noqa: F401
+
         return True
     except ImportError:
         return False
 
 
-def _clear_proxy_env():
+def _clear_proxy_env() -> None:
     """清除代理环境变量（避免本地代理未运行时连接失败）"""
-    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-              "ALL_PROXY", "all_proxy"):
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
         os.environ.pop(k, None)
     os.environ["NO_PROXY"] = "*"
 
 
 # ASR 引擎类映射
-_ASR_ENGINES = {
+_ASR_ENGINES: dict[str, tuple[str | None, str | None]] = {
     "bijian": ("videocaptioner.core.asr.bcut", "BcutASR"),
     "jianying": ("videocaptioner.core.asr.jianying", "JianYingASR"),
 }
@@ -140,7 +95,7 @@ async def transcribe_with_videocaptioner(
     audio_path: Path,
     engine: str,
     timeout: int,
-) -> tuple:
+) -> tuple[bool, str, list[str]]:
     """用 VideoCaptioner Python API 转写音频。
 
     直接传原始文件 bytes 给 ASR 引擎，绕过系统 FFmpeg（精简版无音频解码器）。
@@ -151,41 +106,46 @@ async def transcribe_with_videocaptioner(
     Returns:
         (ok, text, warnings)
     """
-    warns = []
+    warns: list[str] = []
     if not videocaptioner_available():
         return False, "", ["VideoCaptioner 未安装: pip install videocaptioner"]
 
     module_path, class_name = _ASR_ENGINES.get(engine, (None, None))
-    if not module_path:
+    if not module_path or not class_name:
         return False, "", [f"未知 ASR 引擎: {engine}"]
 
     loop = asyncio.get_event_loop()
 
-    def _run():
+    def _run() -> tuple[bool, str, list[str]]:
         try:
             import importlib
+
             _clear_proxy_env()
             module = importlib.import_module(module_path)
-            ASRClass = getattr(module, class_name)
+            asr_class = getattr(module, class_name)
 
             # 读取原始文件 bytes（绕过 FFmpeg）
             with open(audio_path, "rb") as f:
                 audio_bytes = f.read()
 
-            asr = ASRClass(audio_bytes)
+            asr = asr_class(audio_bytes)
             result = asr.run()
             text = result.to_txt()
+            _log.info("asr_success", engine=engine)
             return True, text, []
         except Exception as e:
+            _log.warning("asr_failed", engine=engine, error=str(e)[:200])
             return False, "", [f"{engine} 转写失败: {str(e)[:200]}"]
 
     try:
         ok, text, w = await asyncio.wait_for(
-            loop.run_in_executor(None, _run), timeout=timeout,
+            loop.run_in_executor(None, _run),
+            timeout=timeout,
         )
         return ok, text, warns + w
-    except asyncio.TimeoutError:
+    except TimeoutError:
         warns.append(f"{engine} 转写超时({timeout}s)")
+        _log.warning("asr_timeout", engine=engine, timeout=timeout)
         return False, "", warns
 
 
@@ -193,24 +153,31 @@ async def transcribe_with_videocaptioner(
 # 火山引擎豆包 2.0 转写
 # ═══════════════════════════════════════════════════════════
 
+
 def _guess_audio_format(audio_path: Path) -> str:
     """根据文件扩展名猜火山引擎 audio.format 字段值"""
     ext = audio_path.suffix.lower()
-    mapping = {".wav": "wav", ".mp3": "mp3", ".ogg": "ogg",
-               ".m4a": "mp4", ".mp4": "mp4", ".m4r": "mp4"}
+    mapping = {
+        ".wav": "wav",
+        ".mp3": "mp3",
+        ".ogg": "ogg",
+        ".m4a": "mp4",
+        ".mp4": "mp4",
+        ".m4r": "mp4",
+    }
     return mapping.get(ext, "mp4")
 
 
 async def transcribe_with_volcengine(
     audio_path: Path,
-    vc_cfg: dict,
-) -> tuple:
+    vc_cfg: dict[str, Any],
+) -> tuple[bool, str, list[str]]:
     """用火山引擎录音文件识别 API 转写。
 
     Returns:
         (ok, text, warnings)
     """
-    warns = []
+    warns: list[str] = []
     appid = vc_cfg.get("appid", "")
     token = vc_cfg.get("token", "")
     cluster = vc_cfg.get("cluster", "")
@@ -249,7 +216,9 @@ async def transcribe_with_volcengine(
         async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
             # 2) 提交任务
             r = await client.post(
-                f"{_VOLC_BASE}/submit", headers=headers, json=submit_body,
+                f"{_VOLC_BASE}/submit",
+                headers=headers,
+                json=submit_body,
             )
             data = r.json().get("resp", {})
             code = int(data.get("code", 0))
@@ -260,15 +229,19 @@ async def transcribe_with_volcengine(
 
             # 3) 轮询结果
             query_body = {
-                "appid": appid, "token": token,
-                "cluster": cluster, "id": task_id,
+                "appid": appid,
+                "token": token,
+                "cluster": cluster,
+                "id": task_id,
             }
             elapsed = 0
             while elapsed < poll_timeout:
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
                 rq = await client.post(
-                    f"{_VOLC_BASE}/query", headers=headers, json=query_body,
+                    f"{_VOLC_BASE}/query",
+                    headers=headers,
+                    json=query_body,
                 )
                 qd = rq.json().get("resp", {})
                 qc = int(qd.get("code", 0))
@@ -294,9 +267,11 @@ async def transcribe_with_volcengine(
 # 音频 URL 供给（可插拔）
 # ═══════════════════════════════════════════════════════════
 
+
 async def provision_audio_url(
-    audio_path: Path, url_cfg: dict,
-) -> tuple:
+    audio_path: Path,
+    url_cfg: dict[str, Any],
+) -> tuple[str | None, list[str]]:
     """把本地音频文件供给为公网可下载 URL。
 
     Returns:
@@ -309,22 +284,23 @@ async def provision_audio_url(
         return await _upload_to_tos(audio_path, url_cfg.get("tos", {}))
     if method == "tunnel":
         return await _serve_via_tunnel(audio_path, url_cfg.get("tunnel", {}))
-    return None, [f"未配置 audio_url.method，火山引擎不可用"]
+    return None, ["未配置 audio_url.method，火山引擎不可用"]
 
 
 async def _serve_local_http(
-    audio_path: Path, cfg: dict,
-) -> tuple:
+    audio_path: Path,
+    cfg: dict[str, Any],
+) -> tuple[str | None, list[str]]:
     """方案A：本地 HTTP 服务托管音频文件"""
-    warns = []
+    warns: list[str] = []
     public_base = cfg.get("public_base", "")
     port = cfg.get("port", 8765)
     if not public_base:
         return None, ["local_http 未配置 public_base（公网可达基址）"]
 
+    import functools
     import threading
     from http.server import HTTPServer, SimpleHTTPRequestHandler
-    import functools
 
     serve_dir = audio_path.parent
     handler = functools.partial(SimpleHTTPRequestHandler, directory=str(serve_dir))
@@ -338,17 +314,18 @@ async def _serve_local_http(
 
 
 async def _serve_via_tunnel(
-    audio_path: Path, cfg: dict,
-) -> tuple:
+    audio_path: Path,
+    cfg: dict[str, Any],
+) -> tuple[str | None, list[str]]:
     """方案B：cloudflared 隧道暴露临时公网域名"""
-    warns = []
+    warns: list[str] = []
     binary = cfg.get("binary", "cloudflared")
     serve_dir = audio_path.parent
 
-    import threading
-    from http.server import HTTPServer, SimpleHTTPRequestHandler
     import functools
     import re as re_mod
+    import threading
+    from http.server import HTTPServer, SimpleHTTPRequestHandler
 
     port = 8765
     handler = functools.partial(SimpleHTTPRequestHandler, directory=str(serve_dir))
@@ -358,15 +335,18 @@ async def _serve_via_tunnel(
 
     loop = asyncio.get_event_loop()
 
-    def _start_tunnel():
+    def _start_tunnel() -> tuple[str | None, subprocess.Popen[str] | None]:
         try:
             proc = subprocess.Popen(
                 [binary, "tunnel", "--url", f"http://localhost:{port}"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
             import time
+
             deadline = time.time() + 15
-            while time.time() < deadline:
+            while time.time() < deadline and proc.stdout is not None:
                 line = proc.stdout.readline()
                 if not line:
                     break
@@ -390,10 +370,11 @@ async def _serve_via_tunnel(
 
 
 async def _upload_to_tos(
-    audio_path: Path, cfg: dict,
-) -> tuple:
+    audio_path: Path,
+    cfg: dict[str, Any],
+) -> tuple[str | None, list[str]]:
     """方案C：上传到火山引擎 TOS 对象存储，返回 presigned URL"""
-    warns = []
+    warns: list[str] = []
     access_key = cfg.get("access_key", "")
     secret_key = cfg.get("secret_key", "")
     bucket = cfg.get("bucket", "")
@@ -401,7 +382,7 @@ async def _upload_to_tos(
         return None, ["TOS 未配置 access_key/secret_key/bucket"]
 
     try:
-        import tos  # type: ignore
+        import tos
     except ImportError:
         return None, ["TOS SDK 未安装: pip install tos"]
 
@@ -413,14 +394,17 @@ async def _upload_to_tos(
 
     loop = asyncio.get_event_loop()
 
-    def _upload():
+    def _upload() -> str:
         try:
             client = tos.TosClientV2(access_key, secret_key, endpoint, region)
             client.put_object_from_file(bucket, object_key, str(audio_path))
-            url = client.pre_signed_url(
-                "GET", bucket, object_key, expires=expire_seconds,
+            url: Any = client.pre_signed_url(
+                "GET",
+                bucket,
+                object_key,
+                expires=expire_seconds,
             )
-            return url
+            return str(url)
         except Exception as e:
             return str(e)
 

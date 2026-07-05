@@ -9,27 +9,19 @@
 本模块不抛异常给上层；任何错误都封装在返回 dict 里，确保截图失败不阻断正文剪藏。
 """
 
-from pathlib import Path
-from typing import Optional
 import os
 import shutil as _shutil
+from pathlib import Path
+from typing import Any
+
+from clipper.config import ConfigProxy
+from clipper.logging import get_logger
+
+_CONFIG = ConfigProxy()
+_log = get_logger("clipper.screenshot")
 
 
-# ── 配置加载 ────────────────────────────────────────────
-def _load_config():
-    config_path = Path(__file__).parent.parent / "config.yaml"
-    try:
-        import yaml
-        with open(config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    except Exception:
-        return {}
-
-
-_CONFIG = _load_config()
-
-
-def _screenshot_config() -> dict:
+def _screenshot_config() -> dict[str, Any]:
     return _CONFIG.get("screenshot", {}) or {}
 
 
@@ -37,9 +29,9 @@ async def take_fullpage_screenshot(
     url: str,
     output_dir: Path,
     *,
-    timeout: Optional[int] = None,
-    user_agent: Optional[str] = None,
-) -> dict:
+    timeout: int | None = None,
+    user_agent: str | None = None,
+) -> dict[str, Any]:
     """对 url 做整页长截图，保存到 output_dir/screenshot.png。
 
     返回:
@@ -95,7 +87,9 @@ async def take_fullpage_screenshot(
         from playwright.async_api import async_playwright
     except ImportError:
         result["method"] = "none"
-        result["error"] = "playwright 未安装，请执行: pip install playwright && playwright install chromium"
+        result["error"] = (
+            "playwright 未安装，请执行: pip install playwright && playwright install chromium"
+        )
         return result
 
     target = Path(output_dir) / "screenshot.png"
@@ -110,17 +104,73 @@ async def take_fullpage_screenshot(
                 context = await browser.new_context(**ctx_opts)
                 page = await context.new_page()
                 # networkidle 对懒加载页面更稳；超时用配置值（毫秒）
-                await page.goto(url, wait_until="networkidle",
-                                timeout=timeout * 1000)
+                await page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+
+                # ── 触发懒加载图片（微信 data-src）：直接注入 src，等待加载 ──
+                try:
+                    # 1) 强制 data-src → src：绕过微信 JS，让浏览器原生加载
+                    await page.evaluate("""
+                        () => {
+                            document.querySelectorAll('img[data-src]').forEach(img => {
+                                const ds = img.getAttribute('data-src');
+                                if (ds && !img.src) img.src = ds;
+                            });
+                        }
+                    """)
+                    # 2) 等待新触发的图片请求完成
+                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_timeout(300)
+                    # 3) 滚动兜底触发其余懒加载器
+                    await page.evaluate("""
+                        async () => {
+                            await new Promise((resolve) => {
+                                let h = 0;
+                                const d = 300;
+                                const t = setInterval(() => {
+                                    const sh = document.body.scrollHeight;
+                                    window.scrollBy(0, d);
+                                    h += d;
+                                    if (h >= sh) { clearInterval(t); resolve(); }
+                                }, 100);
+                            });
+                        }
+                    """)
+                    # 4) 等待所有有 src 的图片加载完毕
+                    await page.wait_for_function(
+                        """
+                        () => {
+                            const imgs = Array.from(document.querySelectorAll('img[src]'));
+                            return imgs.length === 0 || imgs.every(img => img.complete);
+                        }
+                    """,
+                        timeout=15000,
+                    )
+                    # 5) 解码余量 + 回顶部
+                    await page.wait_for_timeout(800)
+                    await page.evaluate("window.scrollTo(0, 0)")
+                    await page.wait_for_timeout(300)
+                except Exception:
+                    pass  # 懒加载触发失败不阻断截图，降级为原截图
+
                 output_dir.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(path=str(target), full_page=True)
+                # T023: full_page 和 store_screenshot 从配置读取
+                full_page = cfg.get("full_page", True)
+                store_screenshot = cfg.get("store_screenshot", True)
+                if not store_screenshot:
+                    # 截图已拍摄但不保存文件
+                    result["success"] = True
+                    result["method"] = "playwright"
+                    return result
+                await page.screenshot(path=str(target), full_page=full_page)
                 result["success"] = True
                 result["screenshot_file"] = str(target)
+                _log.info("screenshot_success", url=url, method="playwright")
             finally:
                 await browser.close()
     except Exception as e:
         result["method"] = "playwright"
         result["error"] = f"Playwright 截图失败: {e}"
+        _log.warning("screenshot_failed", url=url, error=str(e))
         # 失败产物清理
         try:
             if target.exists():
